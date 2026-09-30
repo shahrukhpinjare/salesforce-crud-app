@@ -164,28 +164,24 @@ const { sf, frontendUrl } = require("../config/env");
 const { ensureValidToken, persistAuth } = require("../middleware/auth");
 const tokenService = require("../services/tokenService");
 
-// Salesforce OAuth login, callback, session check aur logout ke routes yahan define hain.
 const router = express.Router();
 
 const OAUTH_SCOPES = ["api", "refresh_token", "offline_access"].join(" ");
 
-let code_verifier; // PKCE verifier ko token exchange tak temporarily store karta hai.
+let code_verifier;
 
-// -------------------- LOGIN: Salesforce authorization flow start karta hai --------------------
+// LOGIN
 router.get("/login", (req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
   req.session.oauthState = state;
 
-  // Step 1: Random verifier banate hain, jo baad mein token exchange mein kaam aayega.
   code_verifier = crypto.randomBytes(32).toString("hex");
 
-  // Step 2: Verifier ka SHA-256 challenge banate hain; isse PKCE security milti hai.
   const code_challenge = crypto
     .createHash("sha256")
     .update(code_verifier)
     .digest("base64url");
 
-  // Step 3: OAuth parameters ke saath Salesforce authorization URL banate hain.
   const params = new URLSearchParams({
     response_type: "code",
     client_id: sf.clientId,
@@ -199,7 +195,7 @@ router.get("/login", (req, res) => {
   res.redirect(`${sf.loginUrl}/services/oauth2/authorize?${params.toString()}`);
 });
 
-// -------------------- CALLBACK: Salesforce response handle karke auth save karta hai --------------------
+// CALLBACK
 router.get("/callback", async (req, res) => {
   const { code, state, error, error_description: errorDescription } = req.query;
 
@@ -212,7 +208,6 @@ router.get("/callback", async (req, res) => {
     return res.redirect(`${frontendUrl}?auth_error=missing_code`);
   }
 
-  // State match karke verify karte hain ki callback isi login session se aaya hai.
   if (!state || state !== req.session.oauthState) {
     return res.redirect(`${frontendUrl}?auth_error=invalid_state`);
   }
@@ -220,7 +215,6 @@ router.get("/callback", async (req, res) => {
   delete req.session.oauthState;
 
   try {
-    // Step 4: Authorization code aur PKCE verifier se access/refresh tokens lete hain.
     const response = await axios.post(
       `${sf.loginUrl}/services/oauth2/token`,
       null,
@@ -231,7 +225,7 @@ router.get("/callback", async (req, res) => {
           client_id: sf.clientId,
           client_secret: sf.clientSecret,
           redirect_uri: sf.callbackUrl,
-          code_verifier, // PKCE verifier
+          code_verifier,
         },
       },
     );
@@ -250,7 +244,6 @@ router.get("/callback", async (req, res) => {
 
     let userId = null;
     if (db.isDatabaseConnected()) {
-      // Database connected ho to user ko upsert karke login audit record likhte hain.
       const user = await db.repositories.userRepository.upsertFromIdentity(
         tokenResponse.id,
       );
@@ -263,17 +256,16 @@ router.get("/callback", async (req, res) => {
       });
     }
 
-    // Auth ko session aur database dono mein save karte hain
     await persistAuth(req, auth);
     await tokenService.saveAuth(req.sessionID, auth, userId);
 
-    // FIX: Redirect se pehle explicit session save ka wait karte hain
     req.session.save((err) => {
       if (err) {
         console.error("Session save error:", err);
         return res.redirect(`${frontendUrl}?auth_error=session_save_failed`);
       }
-      res.redirect(`${frontendUrl}?auth=success`);
+      // Session ID query param me bhej rahe hain taaki cookie block hone par bhi login ho jaye
+      res.redirect(`${frontendUrl}?auth=success&sid=${req.sessionID}`);
     });
   } catch (err) {
     const msg = encodeURIComponent(err.message || "oauth_failed");
@@ -281,9 +273,12 @@ router.get("/callback", async (req, res) => {
   }
 });
 
-// -------------------- ME: current session ka authentication status deta hai --------------------
+// ME (Session check with header fallback)
 router.get("/me", async (req, res) => {
-  const auth = await ensureValidToken(req);
+  const sid = req.headers["x-session-id"] || req.sessionID;
+  const auth =
+    (await tokenService.getAuth(sid)) || (await ensureValidToken(req));
+
   if (!auth) {
     return res.status(401).json({ authenticated: false });
   }
@@ -294,19 +289,18 @@ router.get("/me", async (req, res) => {
   });
 });
 
-// -------------------- LOGOUT: auth data aur session clear karta hai --------------------
+// LOGOUT
 router.post("/logout", async (req, res) => {
-  const sessionId = req.sessionID;
+  const sid = req.headers["x-session-id"] || req.sessionID;
 
   if (db.isDatabaseConnected()) {
-    // Database available ho to logout ka audit record bhi save karte hain.
     await db.repositories.auditLogRepository.writeAudit({
       action: "logout",
-      sessionId,
+      sessionId: sid,
     });
   }
 
-  await tokenService.clearAuth(sessionId);
+  await tokenService.clearAuth(sid);
 
   req.session.destroy((err) => {
     if (err) {
