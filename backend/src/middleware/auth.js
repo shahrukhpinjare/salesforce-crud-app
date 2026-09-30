@@ -101,12 +101,12 @@ function isTokenExpired(auth) {
   return Date.now() >= expiresAtMs - TOKEN_EXPIRY_BUFFER_MS;
 }
 
-// Session ID ko header ya session dono se nikalta hai
+// Session ID ko header ya cookie session dono se nikalta hai
 function getEffectiveSessionId(req) {
   return req.headers["x-session-id"] || req.sessionID;
 }
 
-// Pehle database se auth load karta hai, phir session ko fallback ke roop mein use karta hai
+// Database se auth load karta hai, phir session fallback
 async function loadAuth(req) {
   const sid = getEffectiveSessionId(req);
   const fromDb = await tokenService.getAuth(sid);
@@ -126,7 +126,7 @@ async function persistAuth(req, auth) {
   return auth;
 }
 
-// Auth load karke token check karta hai; expire hone par refresh karke naya token save karta hai
+// Token expiry check aur refresh
 async function ensureValidToken(req) {
   let auth = await loadAuth(req);
   if (!auth || !auth.accessToken) {
